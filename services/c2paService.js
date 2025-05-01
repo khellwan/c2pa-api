@@ -29,9 +29,45 @@ async function signAsset(asset, manifest) {
     const { signedAsset, signedManifest } = await c2pa.sign({
       asset,
       manifest,
+      options: {
+        outputPath: "../uploads",
+        embed: true,
+      }
     });
 
-    return signedAsset;
+    const generatedManifest = await c2pa.read({buffer: signedAsset.buffer, mimeType: manifest.definition.format})
+
+    return { signedAsset, generatedManifest };
+}
+
+async function createIngredient(asset, contentCredentials) {
+    const signer = await createTestSigner();
+    const c2pa = createC2pa({
+      signer,
+    });
+  
+    const ingredient = await c2pa.createIngredient({
+      asset,
+      title: contentCredentials.title || 'Default Title',
+      authors: contentCredentials.authors || ['Anonymous'],
+      assertions: [
+        {
+          label: contentCredentials.label || 'c2pa-api.actions',
+          data: {
+            description: contentCredentials.description || 'Default description',
+            version: contentCredentials.version || '1.0.0',
+            actions: [
+              {
+                action: contentCredentials.action || 'c2pa.created',
+                timestamp: new Date().toISOString(),
+              },
+            ],
+          },
+        },
+      ],
+    });
+  
+    return ingredient;
   }
 
 /**
@@ -97,14 +133,6 @@ export const createManifest = async ({ fileData, contentCredentials }) => {
     try {
         // Decode base64 file
         const buffer = Buffer.from(fileData, 'base64');
-        const id = uuidv4();
-    
-        // Use the MIME type to extension conversion function
-        const fileExtension = getMimeTypeExtension(contentCredentials.format);
-    
-        // Temporarily save the file with the extracted extension
-        const tempFileName = id + '.' + fileExtension;
-        const tempFilePath = path.join(__dirname, '../uploads', tempFileName);
     
         // Create a C2PA manifest
         const manifest = new ManifestBuilder({
@@ -126,12 +154,43 @@ export const createManifest = async ({ fileData, contentCredentials }) => {
             ],
         });
 
-
-        // TODO: Use functions to sign and create ingredient
-        // Instantiate signer and c2pa
-        const signer = await createTestSigner();
-        const c2pa = createC2pa({ signer });
+        // Create asset from buffer
+        const asset = { buffer, mimeType: contentCredentials.format };
         
+        const { signedAsset, generatedManifest } = await signAsset(asset, manifest);
+
+        // Generate a storage manifest ID
+        const manifestId = generatedManifest.active_manifest.label.replace('urn:uuid:', '');
+
+        // Define the file path using the manifest ID
+        const fileExtension = getMimeTypeExtension(contentCredentials.format);
+        const tempFileName = manifestId + '.' + fileExtension;
+        const tempFilePath = path.join(__dirname, '../uploads', tempFileName);
+
+        // Save the file to /uploads
+        fs.writeFileSync(tempFilePath, signedAsset.buffer);
+
+        // Save in storage TODO: Use S3 
+        manifestStorage[manifestId] = {
+          manifest,
+          contentCredentials,
+          filePath: tempFilePath,
+          signed: false,
+        };
+
+        return manifestId;
+
+    } catch (err) {
+      console.error('Error creating manifest:', err);
+      throw new Error('Failed to create manifest');
+    }
+};
+
+// Manifest update - add ingredient
+export const updateManifest = async ({ fileData, contentCredentials }) => {
+    try {
+        const buffer = Buffer.from(fileData, 'base64');
+
         // Create ingredient asset from buffer
         const ingredientAssetFromBuffer = {
             buffer: buffer,
@@ -139,112 +198,61 @@ export const createManifest = async ({ fileData, contentCredentials }) => {
         };
 
         // Create ingredient
-        const ingredient = await c2pa.createIngredient({
-            asset: ingredientAssetFromBuffer,
-            title: contentCredentials.title || 'Default Title'
-        });
+        const ingredient = await createIngredient(ingredientAssetFromBuffer, contentCredentials);
         
-        // Add ingredient to manifest
-        manifest.addIngredient(ingredient);
-        
-        // Create asset from buffer
-        const asset = { buffer, mimeType: contentCredentials.format };
-        
-        // Sign the manifest and asset
-        const {signedAsset, signedManifest} = await c2pa.sign({
-            asset,
-            manifest,
-            options: {
-                outputPath: "../uploads",
-            },
-        });
-
-        // Generate a storage manifest ID
-        const manifestId = id;
-
-        // Save in storage
-        manifestStorage[manifestId] = {
-            tempFilePath,
-            manifest,
-            contentCredentials,
-            fileExtension,
-            signed: false,
-        };
-
-        // Writes file with embedded manifest
-        fs.writeFileSync(tempFilePath, signedAsset.buffer);
-        
-        // DEBUG: Log the manifest data
-        //console.log('Manifest data:', await c2pa.read({buffer: signedAsset.buffer, mimeType: contentCredentials.format}));
-
-        // TODO: Store the file in s3 and return the URL
-        return { 
-            signedAsset: signedAsset.buffer.toString('base64'),
-            manifestId 
-        };
-    } catch (err) {
-      console.error('Error creating manifest:', err);
-      throw new Error('Failed to create manifest');
-    }
-};
-
-// Manifest signing
-export const signManifest = async (manifestId) => {
-  // TODO: Implement manifest signature logic. Will it be needed?
-};
-
-// Manifest update - add ingredient
-export const updateManifest = async (fileData, contentCredentials) => {
-    
-    try {
-        const buffer = Buffer.from(fileData, 'base64');
-
-        // Create a C2PA manifest
-        const manifest = new ManifestBuilder({
+        // Create a new manifest builder
+        const newManifest = new ManifestBuilder({
             claim_generator: 'c2pa-api',
             format: contentCredentials.format,
             title: contentCredentials.title || 'Default Title',
             authors: contentCredentials.authors || ['Anonymous'],
             assertions: [
                 {
-                label: contentCredentials.label || 'c2pa-api.actions',
-                data: {
-                    description: contentCredentials.description || 'Default description',
-                    version: contentCredentials.version || '1.0.0',
-                    actions: [
-                    {
-                        action: contentCredentials.action || 'c2pa.created',
-                        timestamp: new Date().toISOString(),
+                    label: 'c2pa-api.actions',
+                    data: {
+                        actions: [
+                            {
+                                action: contentCredentials.action || 'c2pa.edited',
+                                timestamp: new Date().toISOString(),
+                            },
+                        ],
                     },
-                    ],
-                },
                 },
             ],
         });
+        
+        // Add the ingredient to the new manifest
+        newManifest.addIngredient(ingredient);
+        
+        // Create asset from buffer
+        const asset = { buffer, mimeType: contentCredentials.format };
+        
+        // Sign the asset with the new manifest
+        const { signedAsset, generatedManifest } = await signAsset(asset, newManifest);
+        
+        // Generate a storage manifest ID
+        const manifestId = generatedManifest.active_manifest.label.replace('urn:uuid:', '');
 
-        // TODO: Use functions to sign and create ingredient
-        // Instantiate signer and c2pa
-        const signer = await createTestSigner();
-        const c2pa = createC2pa({ signer });
+        // Define the file path using the manifest ID
+        const fileExtension = getMimeTypeExtension(contentCredentials.format);
+        const tempFileName = manifestId + '.' + fileExtension;
+        const tempFilePath = path.join(__dirname, '../uploads', tempFileName);
 
-        // Crete ingredient asset from buffer
-        const ingredientAssetFromBuffer = {
-            buffer: buffer,
-            mimeType: contentCredentials.format
+        // Save the file to /uploads
+        fs.writeFileSync(tempFilePath, signedAsset.buffer);
+
+        // Save in storage TODO: Use S3 
+        manifestStorage[manifestId] = {
+          manifest: newManifest,
+          contentCredentials,
+          filePath: tempFilePath,
+          signed: true,
         };
-
-        // Create ingredient
-        const ingredient = await c2pa.createIngredient({
-            asset: ingredientAssetFromBuffer,
-            title: contentCredentials.title || 'Default Title'
-        });
-
-        // Add ingredient to manifest
-        manifest.addIngredient(ingredient);
-        return manifest;
+        
+        return manifestId;
     } catch (err) {
-        console.error('Error creating manifest:', err);
-        throw new Error('Failed to create manifest');
+        console.error('Error updating manifest:', err);
+        throw new Error('Failed to update manifest');
     }
 };
 
@@ -272,10 +280,10 @@ export const validateManifestByFile = async (fileData, format) => {
         const result = await c2pa.read({ buffer, mimeType});
         if (result) {
             const { active_manifest, manifests, validation_status } = result;
-            if (validation_status) {
-                return({isValid: false, message: 'Found errors in validating manifest: ' + validation_status}.toJson());
+            if (validation_status && validation_status.errors && validation_status.errors.length > 0) {
+                return { isValid: false, message: 'Found errors in validating manifest: ' + JSON.stringify(validation_status.errors) };
             }
-            return({isValid: true, message: active_manifest}.toJson());
+            return { isValid: true, message: active_manifest };
         } else {
             return('No claim found');
         }

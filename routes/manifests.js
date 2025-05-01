@@ -7,10 +7,7 @@ const router = express.Router();
 router.post('/', manifestsController.createManifest);
 
 // Update manifest
-router.post('/', manifestsController.updateManifest);
-
-// Sign manifest with server key
-router.post('/:id/sign', manifestsController.signManifest);
+router.post('/update', manifestsController.updateManifest);
 
 // Validate manifest via ID
 router.get('/:id/validate', manifestsController.validateManifestById);
