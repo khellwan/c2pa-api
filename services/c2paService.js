@@ -1,7 +1,6 @@
 import { ManifestBuilder, createC2pa, SigningAlgorithm, createTestSigner } from 'c2pa-node';
 import fs from 'fs';
 import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -10,6 +9,7 @@ const __dirname = path.dirname(__filename);
 // Simulating a temporary storage for manifests (could be S3 later)
 const manifestStorage = {};
 
+// TODO: Use local signer instead of test signer
 async function createLocalSigner() {
     return{
         type: 'local',
@@ -277,7 +277,7 @@ export const validateManifestByFile = async (fileData, format) => {
         const c2pa = createC2pa({ signer });
     
         // Read the manifest
-        const result = await c2pa.read({ buffer, mimeType});
+        const result = await c2pa.read({ buffer, mimeType });
         if (result) {
             const { active_manifest, manifests, validation_status } = result;
             if (validation_status && validation_status.errors && validation_status.errors.length > 0) {
