@@ -56,8 +56,7 @@ export const updateManifest = async (req, res) => {
 export const validateManifestById = async (req, res) => {
   try {
     const manifestId = req.params.id;
-    const publicKey = req.query.publicKey;
-    const result = await c2paService.validateManifestById(manifestId, publicKey);
+    const result = await c2paService.validateManifestById(manifestId);
     res.status(200).json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });

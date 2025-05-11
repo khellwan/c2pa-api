@@ -175,7 +175,7 @@ export const createManifest = async ({ fileData, contentCredentials }) => {
           manifest,
           contentCredentials,
           filePath: tempFilePath,
-          signed: false,
+          signed: true,
         };
 
         return manifestId;
