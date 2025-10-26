@@ -1,0 +1,17 @@
+# Use AWS Lambda Node.js 20 base image for worker
+FROM public.ecr.aws/lambda/nodejs:20
+
+# Install dependencies needed for c2pa-node (Amazon Linux 2023 uses microdnf)
+RUN microdnf install -y openssl ca-certificates && microdnf clean all
+
+# Copy package files
+COPY package.json package-lock.json* ./
+
+# Install dependencies
+RUN npm ci --omit=dev || npm i --omit=dev
+
+# Copy application code
+COPY . .
+
+# Set Lambda handler for worker
+CMD ["worker.handler"]

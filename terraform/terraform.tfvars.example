@@ -1,0 +1,26 @@
+# Arquivo de exemplo para terraform.tfvars
+# Copie para terraform.tfvars e ajuste os valores
+
+# Configurações básicas
+project_name = "c2pa-api"
+environment  = "dev"
+aws_region   = "us-east-1"
+
+# Lambda configuration
+lambda_memory  = 512
+lambda_timeout = 30
+
+# Configurações opcionais
+# domain_name = "api.example.com"
+# lambda_image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/c2pa-api:latest"
+
+# Lifecycle
+s3_retention_days = 30
+
+# Tags customizadas
+tags = {
+  Project     = "c2pa-api"
+  Environment = "dev"
+  Owner       = "your-team"
+  ManagedBy   = "terraform"
+}

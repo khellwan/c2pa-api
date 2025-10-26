@@ -1,27 +1,33 @@
 import { ManifestBuilder, createC2pa, SigningAlgorithm, createTestSigner } from 'c2pa-node';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { v4 as uuidv4 } from 'uuid';
+import { uploadToS3, downloadFromS3 } from './s3Service.js';
+import { saveManifest, getManifest, updateManifestStatus } from './dynamoService.js';
+import { enqueueJob } from './sqsService.js';
+import { getC2PAKeys } from './secretsService.js';
+import { ENV } from '../config/aws.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const USE_TEST_SIGNER = process.env.USE_TEST_SIGNER === 'true';
 
-// Simulating a temporary storage for manifests (could be S3 later)
-const manifestStorage = {};
-
-// TODO: Use local signer instead of test signer
+// Create local signer with keys from Secrets Manager
 async function createLocalSigner() {
-    return{
-        type: 'local',
-        certificate: process.env.PUBLIC_KEY,
-        privateKey: process.env.PRIVATE_KEY,
-        algorithm: SigningAlgorithm.ES256,
-        tsaUrl: 'http://timestamp.digicert.com',
-    };
+    try {
+        const keys = await getC2PAKeys();
+        
+        return {
+            type: 'local',
+            certificate: keys.certificate,
+            privateKey: keys.privateKey,
+            algorithm: SigningAlgorithm.ES256,
+            tsaUrl: 'http://timestamp.digicert.com',
+        };
+    } catch (error) {
+        console.error('Error creating local signer, falling back to test signer:', error);
+        return await createTestSigner();
+    }
 }
 
 async function signAsset(asset, manifest) {
-    const signer = await createTestSigner();
+    const signer = USE_TEST_SIGNER ? await createTestSigner() : await createLocalSigner();
     const c2pa = createC2pa({
       signer,
     });
@@ -30,7 +36,6 @@ async function signAsset(asset, manifest) {
       asset,
       manifest,
       options: {
-        outputPath: "../uploads",
         embed: true,
       }
     });
@@ -41,7 +46,7 @@ async function signAsset(asset, manifest) {
 }
 
 async function createIngredient(asset, contentCredentials) {
-    const signer = await createTestSigner();
+    const signer = USE_TEST_SIGNER ? await createTestSigner() : await createLocalSigner();
     const c2pa = createC2pa({
       signer,
     });
@@ -133,50 +138,40 @@ export const createManifest = async ({ fileData, contentCredentials }) => {
     try {
         // Decode base64 file
         const buffer = Buffer.from(fileData, 'base64');
-    
-        // Create a C2PA manifest
-        const manifest = new ManifestBuilder({
-            claim_generator: 'c2pa-api',
-            format: contentCredentials.format,
-            title: contentCredentials.title || 'Default Title',
-            authors: contentCredentials.authors || ['Anonymous'],
-            assertions: [
-                {
-                    label: 'c2pa-api.actions',
-                    data: {
-                        actions: [
-                        {
-                            action: 'c2pa.created',
-                        },
-                        ],
-                    },
-                },
-            ],
-        });
-
-        // Create asset from buffer
-        const asset = { buffer, mimeType: contentCredentials.format };
         
-        const { signedAsset, generatedManifest } = await signAsset(asset, manifest);
-
-        // Generate a storage manifest ID
-        const manifestId = generatedManifest.active_manifest.label.replace('urn:uuid:', '');
-
-        // Define the file path using the manifest ID
+        // Generate unique manifest ID
+        const manifestId = uuidv4();
         const fileExtension = getMimeTypeExtension(contentCredentials.format);
-        const tempFileName = manifestId + '.' + fileExtension;
-        const tempFilePath = path.join(__dirname, '../uploads', tempFileName);
-
-        // Save the file to /uploads
-        fs.writeFileSync(tempFilePath, signedAsset.buffer);
-
-        // Save in storage TODO: Use S3 
-        manifestStorage[manifestId] = {
-          manifest,
-          contentCredentials,
-          filePath: tempFilePath,
-          signed: true,
-        };
+        
+        // S3 keys
+        const s3KeyUpload = `uploads/${manifestId}.${fileExtension}`;
+        const s3KeySigned = `signed/${manifestId}.${fileExtension}`;
+        
+        // Upload original file to S3 uploads bucket
+        await uploadToS3(
+            ENV.S3_BUCKET_UPLOADS, 
+            s3KeyUpload, 
+            buffer, 
+            contentCredentials.format
+        );
+        
+        // Save manifest metadata to DynamoDB
+        await saveManifest({
+            manifestId,
+            status: 'PENDING',
+            s3KeyUpload,
+            contentCredentials,
+            format: contentCredentials.format,
+        });
+        
+        // Enqueue job for asynchronous processing
+        await enqueueJob({
+            type: 'SIGN_MANIFEST',
+            manifestId,
+            s3KeyUpload,
+            s3KeySigned,
+            contentCredentials,
+        });
 
         return manifestId;
 
@@ -190,64 +185,40 @@ export const createManifest = async ({ fileData, contentCredentials }) => {
 export const updateManifest = async ({ fileData, contentCredentials }) => {
     try {
         const buffer = Buffer.from(fileData, 'base64');
-
-        // Create ingredient asset from buffer
-        const ingredientAssetFromBuffer = {
-            buffer: buffer,
-            mimeType: contentCredentials.format
-        };
-
-        // Create ingredient
-        const ingredient = await createIngredient(ingredientAssetFromBuffer, contentCredentials);
         
-        // Create a new manifest builder
-        const newManifest = new ManifestBuilder({
-            claim_generator: 'c2pa-api',
+        // Generate unique manifest ID
+        const manifestId = uuidv4();
+        const fileExtension = getMimeTypeExtension(contentCredentials.format);
+        
+        // S3 keys
+        const s3KeyUpload = `uploads/${manifestId}.${fileExtension}`;
+        const s3KeySigned = `signed/${manifestId}.${fileExtension}`;
+        
+        // Upload original file to S3 uploads bucket
+        await uploadToS3(
+            ENV.S3_BUCKET_UPLOADS, 
+            s3KeyUpload, 
+            buffer, 
+            contentCredentials.format
+        );
+        
+        // Save manifest metadata to DynamoDB
+        await saveManifest({
+            manifestId,
+            status: 'PENDING',
+            s3KeyUpload,
+            contentCredentials,
             format: contentCredentials.format,
-            title: contentCredentials.title || 'Default Title',
-            authors: contentCredentials.authors || ['Anonymous'],
-            assertions: [
-                {
-                    label: 'c2pa-api.actions',
-                    data: {
-                        actions: [
-                            {
-                                action: contentCredentials.action || 'c2pa.edited',
-                                timestamp: new Date().toISOString(),
-                            },
-                        ],
-                    },
-                },
-            ],
         });
         
-        // Add the ingredient to the new manifest
-        newManifest.addIngredient(ingredient);
-        
-        // Create asset from buffer
-        const asset = { buffer, mimeType: contentCredentials.format };
-        
-        // Sign the asset with the new manifest
-        const { signedAsset, generatedManifest } = await signAsset(asset, newManifest);
-        
-        // Generate a storage manifest ID
-        const manifestId = generatedManifest.active_manifest.label.replace('urn:uuid:', '');
-
-        // Define the file path using the manifest ID
-        const fileExtension = getMimeTypeExtension(contentCredentials.format);
-        const tempFileName = manifestId + '.' + fileExtension;
-        const tempFilePath = path.join(__dirname, '../uploads', tempFileName);
-
-        // Save the file to /uploads
-        fs.writeFileSync(tempFilePath, signedAsset.buffer);
-
-        // Save in storage TODO: Use S3 
-        manifestStorage[manifestId] = {
-          manifest: newManifest,
-          contentCredentials,
-          filePath: tempFilePath,
-          signed: true,
-        };
+        // Enqueue job for asynchronous processing (update type)
+        await enqueueJob({
+            type: 'UPDATE_MANIFEST',
+            manifestId,
+            s3KeyUpload,
+            s3KeySigned,
+            contentCredentials,
+        });
         
         return manifestId;
     } catch (err) {
@@ -258,12 +229,11 @@ export const updateManifest = async ({ fileData, contentCredentials }) => {
 
 // Manifest validation via ID
 export const validateManifestById = async (manifestId) => {
-    const manifestData = manifestStorage[manifestId];
+    const manifestData = await getManifest(manifestId);
     if (!manifestData) {
         throw new Error('Manifest not found');
     }
     return manifestData;
-
 };
 
 // Manifest validation via file
@@ -273,7 +243,7 @@ export const validateManifestByFile = async (fileData, format) => {
         const buffer = Buffer.from(fileData, 'base64');
         const mimeType = format;
 
-        const signer = await createTestSigner();
+        const signer = USE_TEST_SIGNER ? await createTestSigner() : await createLocalSigner();
         const c2pa = createC2pa({ signer });
     
         // Read the manifest
@@ -291,6 +261,98 @@ export const validateManifestByFile = async (fileData, format) => {
         console.error('Error validating manifest:', err);
         throw new Error('Failed to validate manifest');
     } 
+};
+
+// Process job from SQS (called by worker)
+export const processManifestJob = async (jobData) => {
+    try {
+        const { type, manifestId, s3KeyUpload, s3KeySigned, contentCredentials } = jobData;
+        
+        // Update status to PROCESSING
+        await updateManifestStatus(manifestId, 'PROCESSING');
+        
+        // Download file from S3
+        const buffer = await downloadFromS3(ENV.S3_BUCKET_UPLOADS, s3KeyUpload);
+        
+        // Create asset from buffer
+        const asset = { buffer, mimeType: contentCredentials.format };
+        
+        let manifest;
+        
+        if (type === 'SIGN_MANIFEST') {
+            // Create a C2PA manifest
+            manifest = new ManifestBuilder({
+                claim_generator: 'c2pa-api',
+                format: contentCredentials.format,
+                title: contentCredentials.title || 'Default Title',
+                authors: contentCredentials.authors || ['Anonymous'],
+                assertions: [
+                    {
+                        label: 'c2pa-api.actions',
+                        data: {
+                            actions: [
+                                {
+                                    action: 'c2pa.created',
+                                    timestamp: new Date().toISOString(),
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+        } else if (type === 'UPDATE_MANIFEST') {
+            // Create ingredient
+            const ingredient = await createIngredient(asset, contentCredentials);
+            
+            // Create a new manifest builder
+            manifest = new ManifestBuilder({
+                claim_generator: 'c2pa-api',
+                format: contentCredentials.format,
+                title: contentCredentials.title || 'Default Title',
+                authors: contentCredentials.authors || ['Anonymous'],
+                assertions: [
+                    {
+                        label: 'c2pa-api.actions',
+                        data: {
+                            actions: [
+                                {
+                                    action: contentCredentials.action || 'c2pa.edited',
+                                    timestamp: new Date().toISOString(),
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+            
+            // Add the ingredient
+            manifest.addIngredient(ingredient);
+        }
+        
+        // Sign the asset
+        const { signedAsset } = await signAsset(asset, manifest);
+        
+        // Upload signed file to S3 signed bucket
+        await uploadToS3(
+            ENV.S3_BUCKET_SIGNED,
+            s3KeySigned,
+            signedAsset.buffer,
+            contentCredentials.format
+        );
+        
+        // Update manifest status to DONE
+        await updateManifestStatus(manifestId, 'DONE', s3KeySigned);
+        
+        return { success: true, manifestId };
+        
+    } catch (err) {
+        console.error('Error processing manifest job:', err);
+        
+        // Update status to ERROR
+        await updateManifestStatus(jobData.manifestId, 'ERROR');
+        
+        throw err;
+    }
 };
 
 

@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import express from 'express';
 import manifestsRouter from './routes/manifests.js';
+import uploadsRouter from './routes/uploads.js';
 import swaggerUi from 'swagger-ui-express';
 import YAML from 'yamljs';
 import path from 'path';
@@ -15,9 +16,22 @@ const __dirname = path.dirname(__filename);
 const swaggerDocument = YAML.load(path.join(__dirname, './swagger.yaml'));
 
 app.use(express.json({ limit: '10mb' }));
+
+// Routes
 app.use('/manifests', manifestsRouter);
+app.use('/uploads', uploadsRouter);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+  });
+});
+
+// Error handling middleware
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     console.error('JSON parse error:', err.message);
@@ -26,10 +40,21 @@ app.use((err, req, res, next) => {
       details: "Please check your request body for syntax errors"
     });
   }
-  next(err);
+  
+  console.error('Unhandled error:', err);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    message: err.message,
+  });
 });
 
+// Only start server if not in Lambda environment
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+if (process.env.NODE_ENV !== 'lambda') {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+// Export app for Lambda handler
+export default app;
