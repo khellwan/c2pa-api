@@ -164,10 +164,6 @@ The API follows a simple MVC architecture:
 - **Routes**: Define API endpoints
 
 Files are temporarily stored in the `/uploads` directory.
-## Current Limitations
-
-- Uses a test signer by default (TODO: configure a production signer)
-- Local file storage (TODO: replace with cloud storage)
 
 ## Contributing
 
